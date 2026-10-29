@@ -1,3 +1,10 @@
+# terraform/variables.tf
+variable "aws_region" {
+  type        = string
+  default     = "eu-central-1"
+  description = "Target AWS region where the EBS volume and control plane reside"
+}
+
 variable "volume_id" {
   type        = string
   description = "Target production EBS volume ID (gp3) storing Oracle database files"

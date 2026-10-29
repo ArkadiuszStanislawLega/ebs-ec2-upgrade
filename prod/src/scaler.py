@@ -61,7 +61,7 @@ def get_modification_status(volume_id: str) -> Dict[str, Any]:
     if not modifications:
         return {"state": "none", "minutes_elapsed": 99999.0}
 
-    latest_mod = sorted(modifications, key=lambda x: x["StartTime"], reverse=True)[0]
+    latest_mod = max(modifications, key=lambda x: x["StartTime"])
     elapsed = datetime.now(timezone.utc) - latest_mod["StartTime"]
     return {
         "state": latest_mod["ModificationState"],

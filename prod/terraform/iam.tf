@@ -4,14 +4,15 @@ data "aws_ebs_volume" "target_oracle_vol" {
     values = [var.volume_id]
   }
 
+  filter {
+    name   = "status"
+    values = ["in-use"]
+  }
+
   lifecycle {
     postcondition {
       condition     = self.volume_type == "gp3"
       error_message = "ARCHITECTURE ERROR: Volume ${var.volume_id} is of type '${self.volume_type}'. Only gp3 volumes are supported."
-    }
-    postcondition {
-      condition     = self.state == "in-use"
-      error_message = "OPERATIONAL ERROR: Volume ${var.volume_id} is in state '${self.state}' instead of 'in-use'."
     }
   }
 }

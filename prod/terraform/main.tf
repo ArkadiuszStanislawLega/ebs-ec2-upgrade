@@ -1,3 +1,4 @@
+# terraform/main.tf
 locals {
   alarm_name = "ebs-oracle-throughput-saturation-${var.volume_id}"
 }
@@ -15,17 +16,16 @@ resource "aws_cloudwatch_log_group" "scaler_logs" {
 }
 
 resource "aws_lambda_function" "ebs_scaler" {
-  function_name                  = "ebs-throughput-scaler-${var.volume_id}"
-  description                    = "Automated EBS gp3 throughput/IOPS scaler for Oracle volume ${var.volume_id}"
-  role                           = aws_iam_role.ebs_scaler_role.arn
-  handler                        = "scaler.lambda_handler"
-  runtime                        = "python3.12"
-  filename                       = data.archive_file.lambda_zip.output_path
-  source_code_hash               = data.archive_file.lambda_zip.output_base64sha256
-  timeout                        = 30
-  memory_size                    = 256
-  reserved_concurrent_executions = 1
-  tags                           = var.tags
+  function_name    = "ebs-throughput-scaler-${var.volume_id}"
+  description      = "Automated EBS gp3 throughput/IOPS scaler for Oracle volume ${var.volume_id}"
+  role             = aws_iam_role.ebs_scaler_role.arn
+  handler          = "scaler.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout          = 30
+  memory_size      = 256
+  tags             = var.tags
 
   environment {
     variables = {
