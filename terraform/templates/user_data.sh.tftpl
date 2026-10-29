@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y fio sysstat nvme-cli xfsprogs python3-boto3 jq
 
-cat <<'EOF' > /etc/profile.d/poc_env.sh
+cat <<'EOF' >/etc/profile.d/poc_env.sh
 export POC_VOLUME_ID="${volume_id}"
 export POC_ALARM_NAME="${alarm_name}"
 export AWS_DEFAULT_REGION="${aws_region}"
 EOF
 chmod 0644 /etc/profile.d/poc_env.sh
 
-cat <<'EOF' > /usr/local/bin/poc_load_controller.py
+cat <<'EOF' >/usr/local/bin/poc_load_controller.py
 ${load_controller_py}
 EOF
 chmod 0755 /usr/local/bin/poc_load_controller.py
 
-# Czekamy na podpiecie dodatkowego wolumenu EBS (w Nitro widoczny jako nvme1n1)
 TARGET_DEV=""
 for _ in $(seq 1 30); do
   for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
@@ -41,5 +41,5 @@ fi
 mkdir -p /oradata
 if ! mountpoint -q /oradata; then
   mount -o noatime,nodiratime LABEL=ORADATA /oradata
-  echo "LABEL=ORADATA /oradata xfs defaults,noatime,nodiratime,nofail 0 2" >> /etc/fstab
+  echo "LABEL=ORADATA /oradata xfs defaults,noatime,nodiratime,nofail 0 2" >>/etc/fstab
 fi

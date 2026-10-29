@@ -1,5 +1,5 @@
 output "instance_id" {
-  description = "ID instancji EC2 do polaczenia przez SSM"
+  description = "ID instancji EC2"
   value       = aws_instance.poc_db_host.id
 }
 
@@ -9,7 +9,7 @@ output "data_volume_id" {
 }
 
 output "ssm_connect_command" {
-  description = "Komenda do wejscia na serwer z terminala"
+  description = "Komenda do polaczenia przez SSM"
   value       = "aws ssm start-session --region ${var.aws_region} --target ${aws_instance.poc_db_host.id}"
 }
 

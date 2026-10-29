@@ -1,3 +1,7 @@
+locals {
+  alarm_name = "ebs-oracle-throughput-saturation-${aws_ebs_volume.poc_oracle_data.id}"
+}
+
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_file = "${path.module}/../src/scaler.py"
@@ -17,19 +21,19 @@ resource "aws_lambda_function" "ebs_scaler" {
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout          = 30
-  memory_size      = 128
+  memory_size      = 256
 
   environment {
     variables = {
-      VOLUME_ID                  = aws_ebs_volume.poc_oracle_data.id
-      BASE_THROUGHPUT            = "125"
-      HIGH_THROUGHPUT            = "1000"
-      BASE_IOPS                  = "3000"
-      HIGH_IOPS                  = "4000"
-      SCALE_DOWN_THRESHOLD_MBPS  = "300.0"
-      COOLDOWN_HOURS             = "6.0"
-      MIN_HOURS_BEFORE_SCALEDOWN = tostring(var.min_hours_before_scaledown)
-      LOOKBACK_HOURS             = "1"
+      VOLUME_ID                    = aws_ebs_volume.poc_oracle_data.id
+      ALARM_NAME                   = local.alarm_name
+      BASE_THROUGHPUT              = "125"
+      HIGH_THROUGHPUT              = "1000"
+      BASE_IOPS                    = "3000"
+      HIGH_IOPS                    = "4000"
+      SCALE_DOWN_THRESHOLD_MBPS    = "85.0"
+      MIN_MINUTES_BEFORE_SCALEDOWN = tostring(var.min_minutes_before_scaledown)
+      LOOKBACK_MINUTES             = tostring(var.lookback_minutes)
     }
   }
 
@@ -55,7 +59,7 @@ resource "aws_lambda_permission" "allow_sns" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
-  alarm_name          = "ebs-oracle-throughput-saturation-${aws_ebs_volume.poc_oracle_data.id}"
+  alarm_name          = local.alarm_name
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 2
   datapoints_to_alarm = 2
@@ -102,8 +106,8 @@ resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
 
 resource "aws_cloudwatch_event_rule" "periodic_scaledown_check" {
   name                = "ebs-scaledown-check-${aws_ebs_volume.poc_oracle_data.id}"
-  description         = "Weryfikacja czy wolumen EBS moze wrocic do 125 MB/s"
-  schedule_expression = "rate(15 minutes)"
+  description         = "Szybka weryfikacja Scale-Down co 2 minuty w PoC v2"
+  schedule_expression = "rate(2 minutes)"
 }
 
 resource "aws_cloudwatch_event_target" "invoke_lambda_scaledown" {

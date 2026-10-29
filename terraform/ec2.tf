@@ -11,7 +11,7 @@ resource "aws_ebs_volume" "poc_oracle_data" {
   encrypted         = true
 
   tags = {
-    Name = "poc-oracle-oradata-vol"
+    Name = "poc-v2-oracle-oradata-vol"
   }
 
   lifecycle {
@@ -30,6 +30,7 @@ resource "aws_instance" "poc_db_host" {
   iam_instance_profile        = aws_iam_instance_profile.poc_ec2_profile.name
   associate_public_ip_address = true
   ebs_optimized               = true
+  user_data_replace_on_change = false
 
   root_block_device {
     volume_type           = "gp3"
@@ -46,7 +47,7 @@ resource "aws_instance" "poc_db_host" {
   })
 
   tags = {
-    Name = "poc-oracle-db-host"
+    Name = "poc-v2-oracle-db-host"
   }
 }
 
