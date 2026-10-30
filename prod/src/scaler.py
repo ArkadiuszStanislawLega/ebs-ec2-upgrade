@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -19,23 +19,16 @@ RATE_LIMIT_ERROR_CODES = {
 }
 
 
-def get_config() -> Dict[str, Any]:
-    return {
-        "volume_id": os.environ["VOLUME_ID"],
-        "alarm_name": os.environ["ALARM_NAME"],
-        "base_throughput": int(os.environ.get("BASE_THROUGHPUT", "125")),
-        "high_throughput": int(os.environ.get("HIGH_THROUGHPUT", "1000")),
-        "base_iops": int(os.environ.get("BASE_IOPS", "3000")),
-        "high_iops": int(os.environ.get("HIGH_IOPS", "4000")),
-        "scale_down_threshold_mbps": float(os.environ.get("SCALE_DOWN_THRESHOLD_MBPS", "85.0")),
-        "min_minutes_before_scaledown": float(os.environ.get("MIN_MINUTES_BEFORE_SCALEDOWN", "60.0")),
-        "lookback_minutes": int(os.environ.get("LOOKBACK_MINUTES", "60")),
-    }
+def load_volumes_config() -> Dict[str, Dict[str, Any]]:
+    raw_json = os.environ.get("VOLUMES_CONFIG_JSON", "{}")
+    configs: Dict[str, Dict[str, Any]] = json.loads(raw_json)
+    if not configs:
+        raise RuntimeError("VOLUMES_CONFIG_JSON environment variable is empty or not set.")
+    return configs
 
 
 def log_event(level: int, event_type: str, **kwargs: Any) -> None:
-    payload = {"event": event_type, **kwargs}
-    logger.log(level, json.dumps(payload))
+    logger.log(level, json.dumps({"event": event_type, **kwargs}))
 
 
 def get_volume_state(volume_id: str) -> Dict[str, Any]:
@@ -159,7 +152,11 @@ def modify_ebs(volume_id: str, throughput: int, iops: int, direction: str) -> Di
                 volume_id=volume_id,
                 aws_error_code=error_code,
             )
-            return {"status": "deferred_by_aws_rate_limit", "aws_error_code": error_code}
+            return {
+                "status": "deferred_by_aws_rate_limit",
+                "volume_id": volume_id,
+                "aws_error_code": error_code,
+            }
         log_event(
             logging.ERROR,
             "ebs_modify_failed",
@@ -170,8 +167,7 @@ def modify_ebs(volume_id: str, throughput: int, iops: int, direction: str) -> Di
         raise
 
 
-def handle_scale_up(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    vol_id = cfg["volume_id"]
+def scale_up_single_volume(vol_id: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     vol = get_volume_state(vol_id)
     current_tp = vol.get("Throughput", cfg["base_throughput"])
     current_iops = vol.get("Iops", cfg["base_iops"])
@@ -184,7 +180,7 @@ def handle_scale_up(cfg: Dict[str, Any]) -> Dict[str, Any]:
             volume_id=vol_id,
             current_throughput_mbps=current_tp,
         )
-        return {"status": "skipped", "reason": "already_at_high_throughput"}
+        return {"status": "skipped", "volume_id": vol_id, "reason": "already_at_high_throughput"}
 
     mod_status = get_modification_status(vol_id)
     if mod_status["state"] == "modifying":
@@ -194,14 +190,13 @@ def handle_scale_up(cfg: Dict[str, Any]) -> Dict[str, Any]:
             reason="modification_in_progress",
             volume_id=vol_id,
         )
-        return {"status": "skipped", "reason": "modification_in_progress"}
+        return {"status": "skipped", "volume_id": vol_id, "reason": "modification_in_progress"}
 
-    target_iops = max(current_iops, cfg["high_iops"])
-    return modify_ebs(vol_id, cfg["high_throughput"], target_iops, direction="scale_up")
+    target_iops = max(current_iops, int(cfg["high_iops"]))
+    return modify_ebs(vol_id, int(cfg["high_throughput"]), target_iops, direction="scale_up")
 
 
-def handle_scale_down(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    vol_id = cfg["volume_id"]
+def scale_down_single_volume(vol_id: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     vol = get_volume_state(vol_id)
     current_tp = vol.get("Throughput", cfg["base_throughput"])
 
@@ -213,7 +208,7 @@ def handle_scale_down(cfg: Dict[str, Any]) -> Dict[str, Any]:
             volume_id=vol_id,
             current_throughput_mbps=current_tp,
         )
-        return {"status": "skipped", "reason": "already_at_base_throughput"}
+        return {"status": "skipped", "volume_id": vol_id, "reason": "already_at_base_throughput"}
 
     mod_status = get_modification_status(vol_id)
     if mod_status["state"] == "modifying":
@@ -223,19 +218,21 @@ def handle_scale_down(cfg: Dict[str, Any]) -> Dict[str, Any]:
             reason="modification_in_progress",
             volume_id=vol_id,
         )
-        return {"status": "skipped", "reason": "modification_in_progress"}
+        return {"status": "skipped", "volume_id": vol_id, "reason": "modification_in_progress"}
 
-    if mod_status["minutes_elapsed"] < cfg["min_minutes_before_scaledown"]:
+    min_hold = float(cfg["min_minutes_before_scaledown"])
+    if mod_status["minutes_elapsed"] < min_hold:
         log_event(
             logging.INFO,
             "scale_down_skipped",
             reason="measurement_window_active",
             volume_id=vol_id,
             minutes_elapsed=round(mod_status["minutes_elapsed"], 1),
-            required_minutes=cfg["min_minutes_before_scaledown"],
+            required_minutes=min_hold,
         )
         return {
             "status": "skipped",
+            "volume_id": vol_id,
             "reason": "measurement_window_active",
             "minutes_since_last_mod": round(mod_status["minutes_elapsed"], 1),
         }
@@ -248,42 +245,103 @@ def handle_scale_down(cfg: Dict[str, Any]) -> Dict[str, Any]:
             volume_id=vol_id,
             alarm_name=cfg["alarm_name"],
         )
-        return {"status": "skipped", "reason": "alarm_not_ok"}
+        return {"status": "skipped", "volume_id": vol_id, "reason": "alarm_not_ok"}
 
-    max_tp = get_max_throughput_mbps(vol_id, cfg["lookback_minutes"])
-    if max_tp >= cfg["scale_down_threshold_mbps"]:
+    max_tp = get_max_throughput_mbps(vol_id, int(cfg["lookback_minutes"]))
+    threshold = float(cfg["scale_down_threshold_mbps"])
+    if max_tp >= threshold:
         log_event(
             logging.INFO,
             "scale_down_skipped",
             reason="utilization_above_threshold",
             volume_id=vol_id,
             max_mbps=round(max_tp, 2),
-            threshold_mbps=cfg["scale_down_threshold_mbps"],
+            threshold_mbps=threshold,
         )
-        return {"status": "skipped", "reason": "utilization_above_threshold", "max_mbps": round(max_tp, 2)}
+        return {
+            "status": "skipped",
+            "volume_id": vol_id,
+            "reason": "utilization_above_threshold",
+            "max_mbps": round(max_tp, 2),
+        }
 
-    return modify_ebs(vol_id, cfg["base_throughput"], cfg["base_iops"], direction="scale_down")
+    return modify_ebs(vol_id, int(cfg["base_throughput"]), int(cfg["base_iops"]), direction="scale_down")
 
 
-ACTION_DISPATCHER: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
-    "scale_up": handle_scale_up,
-    "scale_down": handle_scale_down,
+def extract_volume_id_from_sns(sns_message_str: str, volumes_cfg: Dict[str, Dict[str, Any]]) -> str:
+    msg = json.loads(sns_message_str)
+    trigger = msg.get("Trigger", {})
+
+    for metric_item in trigger.get("Metrics", []):
+        dims = metric_item.get("MetricStat", {}).get("Metric", {}).get("Dimensions", [])
+        for dim in dims:
+            if dim.get("name") in ("VolumeId", "volume-id") and dim.get("value") in volumes_cfg:
+                return str(dim["value"])
+
+    alarm_name = msg.get("AlarmName", "")
+    for vol_id, cfg in volumes_cfg.items():
+        if cfg.get("alarm_name") == alarm_name:
+            return vol_id
+
+    raise ValueError(f"Could not resolve managed volume_id from SNS alarm message: {alarm_name}")
+
+
+def handle_scale_up_dispatch(
+    volumes_cfg: Dict[str, Dict[str, Any]],
+    target_volume_id: Optional[str],
+) -> Dict[str, Any]:
+    if not target_volume_id or target_volume_id not in volumes_cfg:
+        raise ValueError(f"Volume '{target_volume_id}' is not registered in VOLUMES_CONFIG_JSON.")
+    return scale_up_single_volume(target_volume_id, volumes_cfg[target_volume_id])
+
+
+def handle_scale_down_dispatch(
+    volumes_cfg: Dict[str, Dict[str, Any]],
+    target_volume_id: Optional[str],
+) -> Dict[str, Any]:
+    if target_volume_id:
+        if target_volume_id not in volumes_cfg:
+            raise ValueError(f"Volume '{target_volume_id}' is not registered in VOLUMES_CONFIG_JSON.")
+        return scale_down_single_volume(target_volume_id, volumes_cfg[target_volume_id])
+
+    results: Dict[str, Any] = {}
+    for vol_id, cfg in volumes_cfg.items():
+        try:
+            results[vol_id] = scale_down_single_volume(vol_id, cfg)
+        except Exception as exc:
+            log_event(logging.ERROR, "volume_scale_down_error", volume_id=vol_id, error=str(exc))
+            results[vol_id] = {"status": "error", "volume_id": vol_id, "error": str(exc)}
+
+    return {"status": "batch_completed", "results": results}
+
+
+ACTION_DISPATCHER: Dict[str, Callable[[Dict[str, Dict[str, Any]], Optional[str]], Dict[str, Any]]] = {
+    "scale_up": handle_scale_up_dispatch,
+    "scale_down": handle_scale_down_dispatch,
 }
 
 
-def resolve_action(event: Dict[str, Any]) -> str:
+def resolve_invocation(
+    event: Dict[str, Any],
+    volumes_cfg: Dict[str, Dict[str, Any]],
+) -> tuple[str, Optional[str]]:
     records = event.get("Records", [])
     if records and records[0].get("EventSource") == "aws:sns":
-        return "scale_up"
-    return str(event.get("action", ""))
+        sns_msg = records[0].get("Sns", {}).get("Message", "{}")
+        vol_id = extract_volume_id_from_sns(sns_msg, volumes_cfg)
+        return "scale_up", vol_id
+
+    action = str(event.get("action", ""))
+    vol_id = event.get("volume_id")
+    return action, vol_id
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    cfg = get_config()
-    action = resolve_action(event)
+    volumes_cfg = load_volumes_config()
+    action, target_vol_id = resolve_invocation(event, volumes_cfg)
 
     handler = ACTION_DISPATCHER.get(action)
     if not handler:
         raise ValueError(f"Unsupported action in dispatcher: '{action}'")
 
-    return handler(cfg)
+    return handler(volumes_cfg, target_vol_id)

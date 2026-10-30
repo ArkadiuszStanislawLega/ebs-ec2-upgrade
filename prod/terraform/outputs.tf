@@ -1,24 +1,25 @@
-output "monitored_volume_arn" {
-  description = "ARN of the monitored production EBS volume"
-  value       = data.aws_ebs_volume.target_oracle_vol.arn
-}
-
-output "detected_initial_iops" {
-  description = "IOPS value detected on the volume during Terraform read"
-  value       = data.aws_ebs_volume.target_oracle_vol.iops
+output "enrolled_volumes" {
+  description = "Map of enrolled EBS volume IDs to their ARNs and detected initial IOPS"
+  value = {
+    for vol_id, vol in data.aws_ebs_volume.managed_volumes : vol_id => {
+      arn           = vol.arn
+      detected_iops = vol.iops
+      size_gb       = vol.size
+    }
+  }
 }
 
 output "scaler_lambda_name" {
-  description = "Name of the deployed EBS scaler Lambda function"
+  description = "Name of the centralized EBS scaler Lambda function"
   value       = aws_lambda_function.ebs_scaler.function_name
 }
 
-output "cloudwatch_alarm_name" {
-  description = "Name of the CloudWatch Metric Math alarm triggering scale-up"
-  value       = aws_cloudwatch_metric_alarm.ebs_throughput_high.alarm_name
+output "cloudwatch_alarm_names" {
+  description = "Map of volume IDs to their CloudWatch alarm names"
+  value       = { for k, v in aws_cloudwatch_metric_alarm.ebs_throughput_high : k => v.alarm_name }
 }
 
 output "eventbridge_rule_name" {
-  description = "Name of the EventBridge rule triggering periodic scale-down checks"
+  description = "Name of the shared EventBridge rule triggering periodic scale-down"
   value       = aws_cloudwatch_event_rule.periodic_scaledown_check.name
 }

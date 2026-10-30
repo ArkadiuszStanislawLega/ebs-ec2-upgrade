@@ -1,7 +1,9 @@
-data "aws_ebs_volume" "target_oracle_vol" {
+data "aws_ebs_volume" "managed_volumes" {
+  for_each = var.volumes
+
   filter {
     name   = "volume-id"
-    values = [var.volume_id]
+    values = [each.key]
   }
 
   filter {
@@ -12,7 +14,7 @@ data "aws_ebs_volume" "target_oracle_vol" {
   lifecycle {
     postcondition {
       condition     = self.volume_type == "gp3"
-      error_message = "ARCHITECTURE ERROR: Volume ${var.volume_id} is of type '${self.volume_type}'. Only gp3 volumes are supported."
+      error_message = "ARCHITECTURE ERROR: Volume ${each.key} is of type '${self.volume_type}'. Only gp3 volumes are supported."
     }
   }
 }
@@ -29,17 +31,17 @@ data "aws_iam_policy_document" "lambda_assume" {
 }
 
 resource "aws_iam_role" "ebs_scaler_role" {
-  name               = "ebs-throughput-scaler-role-${var.volume_id}"
+  name               = "${var.name_prefix}-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
   tags               = var.tags
 }
 
 data "aws_iam_policy_document" "ebs_scaler_permissions" {
   statement {
-    sid       = "ModifyTargetVolumeOnly"
+    sid       = "ModifyEnrolledVolumesOnly"
     effect    = "Allow"
     actions   = ["ec2:ModifyVolume"]
-    resources = [data.aws_ebs_volume.target_oracle_vol.arn]
+    resources = [for vol in data.aws_ebs_volume.managed_volumes : vol.arn]
   }
 
   statement {
@@ -66,7 +68,7 @@ data "aws_iam_policy_document" "ebs_scaler_permissions" {
 }
 
 resource "aws_iam_role_policy" "ebs_scaler_policy" {
-  name   = "ebs-scaler-least-privilege"
+  name   = "${var.name_prefix}-least-privilege"
   role   = aws_iam_role.ebs_scaler_role.id
   policy = data.aws_iam_policy_document.ebs_scaler_permissions.json
 }

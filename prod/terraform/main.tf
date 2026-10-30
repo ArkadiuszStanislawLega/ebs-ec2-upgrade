@@ -1,6 +1,16 @@
-# terraform/main.tf
 locals {
-  alarm_name = "ebs-oracle-throughput-saturation-${var.volume_id}"
+  volumes_runtime_config = {
+    for vol_id, cfg in var.volumes : vol_id => {
+      alarm_name                   = "${var.name_prefix}-saturation-${vol_id}"
+      base_throughput              = cfg.base_throughput
+      high_throughput              = cfg.high_throughput
+      base_iops                    = cfg.base_iops
+      high_iops                    = cfg.high_iops
+      scale_down_threshold_mbps    = cfg.scale_down_threshold_mbps
+      min_minutes_before_scaledown = cfg.min_minutes_before_scaledown
+      lookback_minutes             = cfg.lookback_minutes
+    }
+  }
 }
 
 data "archive_file" "lambda_zip" {
@@ -10,42 +20,35 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_cloudwatch_log_group" "scaler_logs" {
-  name              = "/aws/lambda/ebs-throughput-scaler-${var.volume_id}"
+  name              = "/aws/lambda/${var.name_prefix}"
   retention_in_days = var.log_retention_days
   tags              = var.tags
 }
 
 resource "aws_lambda_function" "ebs_scaler" {
-  function_name    = "ebs-throughput-scaler-${var.volume_id}"
-  description      = "Automated EBS gp3 throughput/IOPS scaler for Oracle volume ${var.volume_id}"
+  function_name    = var.name_prefix
+  description      = "Centralized multi-volume EBS gp3 throughput/IOPS auto-scaler"
   role             = aws_iam_role.ebs_scaler_role.arn
   handler          = "scaler.lambda_handler"
   runtime          = "python3.12"
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  timeout          = 30
+  timeout          = 60
   memory_size      = 256
   tags             = var.tags
 
   environment {
     variables = {
-      VOLUME_ID                    = var.volume_id
-      ALARM_NAME                   = local.alarm_name
-      BASE_THROUGHPUT              = tostring(var.base_throughput)
-      HIGH_THROUGHPUT              = tostring(var.high_throughput)
-      BASE_IOPS                    = tostring(var.base_iops)
-      HIGH_IOPS                    = tostring(var.high_iops)
-      SCALE_DOWN_THRESHOLD_MBPS    = tostring(var.scale_down_threshold_mbps)
-      MIN_MINUTES_BEFORE_SCALEDOWN = tostring(var.min_minutes_before_scaledown)
-      LOOKBACK_MINUTES             = tostring(var.lookback_minutes)
+      VOLUMES_CONFIG_JSON = jsonencode(local.volumes_runtime_config)
     }
   }
 
   depends_on = [aws_cloudwatch_log_group.scaler_logs]
 }
 
+# --- SHARED SNS TOPIC FOR SCALE-UP EVENTS ---
 resource "aws_sns_topic" "scale_up_topic" {
-  name = "ebs-scale-up-trigger-${var.volume_id}"
+  name = "${var.name_prefix}-scale-up-topic"
   tags = var.tags
 }
 
@@ -63,13 +66,16 @@ resource "aws_lambda_permission" "allow_sns" {
   source_arn    = aws_sns_topic.scale_up_topic.arn
 }
 
+# --- PER-VOLUME CLOUDWATCH METRIC MATH ALARMS ---
 resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
-  alarm_name          = local.alarm_name
+  for_each = var.volumes
+
+  alarm_name          = local.volumes_runtime_config[each.key].alarm_name
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2
-  threshold           = var.scale_up_threshold_mbps
-  alarm_description   = "EBS throughput saturation above ${var.scale_up_threshold_mbps} MB/s on volume ${var.volume_id}"
+  threshold           = each.value.scale_up_threshold_mbps
+  alarm_description   = "EBS throughput saturation above ${each.value.scale_up_threshold_mbps} MB/s on volume ${each.key}"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.scale_up_topic.arn]
   tags                = var.tags
@@ -83,7 +89,7 @@ resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
       period      = 60
       stat        = "Sum"
       dimensions = {
-        VolumeId = var.volume_id
+        VolumeId = each.key
       }
     }
   }
@@ -97,7 +103,7 @@ resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
       period      = 60
       stat        = "Sum"
       dimensions = {
-        VolumeId = var.volume_id
+        VolumeId = each.key
       }
     }
   }
@@ -110,16 +116,17 @@ resource "aws_cloudwatch_metric_alarm" "ebs_throughput_high" {
   }
 }
 
+# --- SHARED EVENTBRIDGE RULE FOR PERIODIC SCALE-DOWN ---
 resource "aws_cloudwatch_event_rule" "periodic_scaledown_check" {
-  name                = "ebs-scaledown-check-${var.volume_id}"
-  description         = "Periodic scale-down evaluation for volume ${var.volume_id}"
+  name                = "${var.name_prefix}-scaledown-check"
+  description         = "Periodic batch scale-down evaluation for all enrolled EBS volumes"
   schedule_expression = var.scaledown_check_schedule
   tags                = var.tags
 }
 
 resource "aws_cloudwatch_event_target" "invoke_lambda_scaledown" {
   rule      = aws_cloudwatch_event_rule.periodic_scaledown_check.name
-  target_id = "InvokeEbsScalerDown"
+  target_id = "InvokeEbsScalerDownBatch"
   arn       = aws_lambda_function.ebs_scaler.arn
   input     = jsonencode({ action = "scale_down" })
 }
