@@ -52,41 +52,41 @@ Dokument opisuje szczegółowy przepływ sygnałów sterujących, strukturę pay
 
 ```mermaid
 flowchart TB
-    subgraph Storage["Warstwa Danych (Zarządzana przez bazowy moduł Terraform EC2)"]
-        EBS1[("EBS gp3: vol-01..vol-N\nStan: in-use\nBaza: 125 MB/s | 3000 IOPS\nSzczyt: 1000 MB/s | 4000 IOPS")]
+    subgraph Storage["Warstwa Danych (Moduł Bazowy Terraform EC2)"]
+        EBS1[("EBS gp3: vol-01..vol-N<br/>Stan: in-use<br/>Baza: 125 MB/s | 3000 IOPS<br/>Szczyt: 1000 MB/s | 4000 IOPS")]
     end
 
     subgraph Triggers["Warstwa Detekcji i Wyzwalaczy (Ingress)"]
-        CW_ALARM["CloudWatch Metric Math Alarms\n(Po 1 alarmie na każdy dysk)\nPróg: >= 105 MB/s (2 z 3 min)"]
-        SNS["AWS SNS Topic\noracle-ebs-scaler-scale-up-topic"]
-        EB["Amazon EventBridge Rule\noracle-ebs-scaler-scaledown-check\nHarmonogram: rate(30 minutes)"]
+        CW_ALARM["CloudWatch Metric Math Alarms<br/>(Po 1 alarmie na każdy dysk)<br/>Próg: min. 105 MB/s (2 z 3 min)"]
+        SNS["AWS SNS Topic<br/>oracle-ebs-scaler-scale-up-topic"]
+        EB["Amazon EventBridge Rule<br/>oracle-ebs-scaler-scaledown-check<br/>Harmonogram: rate(30 minutes)"]
     end
 
     subgraph SecurityIngress["Granica Autoryzacji Wejściowej (Lambda Resource Policy)"]
-        PERM_SNS["aws_lambda_permission: AllowExecutionFromSNS\nPrincipal: sns.amazonaws.com\nCondition: SourceArn == SNS Topic ARN"]
-        PERM_EB["aws_lambda_permission: AllowExecutionFromEventBridge\nPrincipal: events.amazonaws.com\nCondition: SourceArn == EventBridge Rule ARN"]
+        PERM_SNS["aws_lambda_permission: AllowExecutionFromSNS<br/>Principal: sns.amazonaws.com<br/>Condition: SourceArn == SNS Topic ARN"]
+        PERM_EB["aws_lambda_permission: AllowExecutionFromEventBridge<br/>Principal: events.amazonaws.com<br/>Condition: SourceArn == EventBridge Rule ARN"]
     end
 
     subgraph Compute["Silnik Sterujący (Python 3.12)"]
-        LAMBDA["AWS Lambda: oracle-ebs-scaler\nENV: VOLUMES_CONFIG_JSON\nDispatcher: scale_up | scale_down"]
+        LAMBDA["AWS Lambda: oracle-ebs-scaler<br/>ENV: VOLUMES_CONFIG_JSON<br/>Dispatcher: scale_up | scale_down"]
     end
 
     subgraph SecurityEgress["Granica Autoryzacji Wyjściowej (IAM Execution Role: oracle-ebs-scaler-lambda-role)"]
-        IAM_MOD["Sid: ModifyEnrolledVolumesOnly\nAllow: ec2:ModifyVolume\nResource: TYLKO lista ARN dysków z var.volumes\n(Brak ec2:DeleteVolume / ec2:DetachVolume)"]
-        IAM_READ["Sid: ReadVolumeAndCloudWatchTelemetry\nAllow: ec2:DescribeVolumes, ec2:DescribeVolumesModifications,\ncloudwatch:DescribeAlarms, cloudwatch:GetMetricData\nResource: *"]
-        IAM_LOGS["Sid: WriteLambdaLogs\nAllow: logs:CreateLogStream, logs:PutLogEvents\nResource: arn:aws:logs:.../aws/lambda/oracle-ebs-scaler:*"]
+        IAM_MOD["Sid: ModifyEnrolledVolumesOnly<br/>Allow: ec2:ModifyVolume<br/>Resource: TYLKO lista ARN dysków z var.volumes<br/>(Brak ec2:DeleteVolume / ec2:DetachVolume)"]
+        IAM_READ["Sid: ReadVolumeAndCloudWatchTelemetry<br/>Allow: ec2:DescribeVolumes, ec2:DescribeVolumesModifications,<br/>cloudwatch:DescribeAlarms, cloudwatch:GetMetricData<br/>Resource: *"]
+        IAM_LOGS["Sid: WriteLambdaLogs<br/>Allow: logs:CreateLogStream, logs:PutLogEvents<br/>Resource: arn:aws:logs:.../aws/lambda/oracle-ebs-scaler:*"]
     end
 
-    subgraphObservability["Telemetria i Audyt"]
-        CW_LOGS[("CloudWatch Log Group\n/aws/lambda/oracle-ebs-scaler\nRetencja: 90 dni")]
-        CW_METRICS[("CloudWatch Metrics API\nAWS/EBS Namespace")]
+    subgraph Observability["Telemetria i Audyt"]
+        CW_LOGS[("CloudWatch Log Group<br/>/aws/lambda/oracle-ebs-scaler<br/>Retencja: 90 dni")]
+        CW_METRICS[("CloudWatch Metrics API<br/>AWS/EBS Namespace")]
     end
 
-    EBS1 -. "1. Publikacja metryk co 60s\n(VolumeReadBytes + VolumeWriteBytes)" .-> CW_METRICS
+    EBS1 -. "1. Publikacja metryk co 60s<br/>(VolumeReadBytes + VolumeWriteBytes)" .-> CW_METRICS
     CW_METRICS --> CW_ALARM
     CW_ALARM -- "2. Stan ALARM -> Publikacja JSON" --> SNS
     SNS -- "3a. Wyzwolenie Push" --> PERM_SNS
-    EB -- "3b. Wyzwolenie Cykliczne\n{'action': 'scale_down'}" --> PERM_EB
+    EB -- "3b. Wyzwolenie Cykliczne<br/>payload: action=scale_down" --> PERM_EB
     PERM_SNS --> LAMBDA
     PERM_EB --> LAMBDA
 
@@ -94,8 +94,8 @@ flowchart TB
     LAMBDA -- "Przyjęcie roli (sts:AssumeRole)" --> IAM_READ
     LAMBDA -- "Przyjęcie roli (sts:AssumeRole)" --> IAM_LOGS
 
-    IAM_MOD == "ec2:ModifyVolume\n(Throughput, Iops)" ==> EBS1
-    IAM_READ -. "Odczyt stanu dysku, czasu modyfikacji\ni pików z ostatnich 60 min" .-> CW_METRICS
+    IAM_MOD == "ec2:ModifyVolume<br/>(Throughput, Iops)" ==> EBS1
+    IAM_READ -. "Odczyt stanu dysku, czasu modyfikacji<br/>i pików z ostatnich 60 min" .-> CW_METRICS
     IAM_READ -. "ec2:DescribeVolumes*" .-> EBS1
     IAM_LOGS -- "Strumieniowanie zdarzeń JSON" --> CW_LOGS
 ```
@@ -116,34 +116,34 @@ sequenceDiagram
 
     Note over EBS,LOG: SCENARIUSZ A: Przeciążenie dysku podczas fakturowania (Scale-Up)
     EBS->>CW: Zrzut metryk VolumeReadBytes + VolumeWriteBytes (co 1 min)
-    CW->>CW: Ewaluacja Metric Math: (read + write)/60/1048576 >= 105 MB/s (2 z 3 min)
+    CW->>CW: Ewaluacja Metric Math: (read + write)/60/1048576 min. 105 MB/s (2 z 3 min)
     CW->>SNS: Zmiana stanu na ALARM -> Wysłanie wiadomości JSON z metrykami
     SNS->>L: InvokeFunction (Autoryzacja przez AllowExecutionFromSNS)
-    L->>L: resolve_invocation() -> Wykrycie źródła 'aws:sns'
+    L->>L: resolve_invocation() -> Wykrycie źródła aws:sns
     L->>L: extract_volume_id_from_sns() -> Wyciągnięcie VolumeId z Trigger.Metrics
     L->>L: Walidacja czy VolumeId istnieje w VOLUMES_CONFIG_JSON
     L->>EBS: ec2:DescribeVolumes (Sprawdzenie aktualnego Throughput i IOPS)
-    L->>EBS: ec2:DescribeVolumesModifications (Sprawdzenie czy stan != 'modifying')
-    alt Guard Clauses spełnione (Throughput < 1000 MB/s oraz brak aktywnej modyfikacji)
+    L->>EBS: ec2:DescribeVolumesModifications (Sprawdzenie czy stan != modifying)
+    alt Guard Clauses spełnione (Throughput poniżej 1000 MB/s oraz brak aktywnej modyfikacji)
         L->>EBS: ec2:ModifyVolume(VolumeId, Throughput=1000, Iops=4000)
-        L->>LOG: PutLogEvents: {"event": "ebs_modified", "direction": "scale_up"}
+        L->>LOG: PutLogEvents: event=ebs_modified, direction=scale_up
     else Limit API AWS (VolumeModificationRateExceeded)
-        L->>LOG: PutLogEvents (ERROR): {"event": "ebs_modify_deferred", "direction": "scale_up"}
+        L->>LOG: PutLogEvents (ERROR): event=ebs_modify_deferred, direction=scale_up
     end
 
     Note over EBS,LOG: SCENARIUSZ B: Cykliczna weryfikacja zejścia w dół (Scale-Down)
-    EB->>L: InvokeFunction {"action": "scale_down"} (AllowExecutionFromEventBridge)
+    EB->>L: InvokeFunction payload: action=scale_down (AllowExecutionFromEventBridge)
     L->>L: Pobranie listy wszystkich dysków z VOLUMES_CONFIG_JSON
     loop Niezależna iteracja dla każdego dysku (izolacja try/except)
-        L->>EBS: [Guard 1] ec2:DescribeVolumes (Czy aktualny Throughput > 125 MB/s?)
-        L->>EBS: [Guard 2] ec2:DescribeVolumesModifications (Czy stan != 'modifying' i minęło >= 60 min?)
-        L->>CW: [Guard 3] cloudwatch:DescribeAlarms (Czy alarm dla dysku ma stan 'OK'?)
-        L->>CW: [Guard 4] cloudwatch:GetMetricData (Czy max 1-min pik z ostatnich 60 min < 85 MB/s?)
+        L->>EBS: [Guard 1] ec2:DescribeVolumes (Czy aktualny Throughput powyżej 125 MB/s?)
+        L->>EBS: [Guard 2] ec2:DescribeVolumesModifications (Czy stan != modifying i minęło min. 60 min?)
+        L->>CW: [Guard 3] cloudwatch:DescribeAlarms (Czy alarm dla dysku ma stan OK?)
+        L->>CW: [Guard 4] cloudwatch:GetMetricData (Czy max 1-min pik z ostatnich 60 min poniżej 85 MB/s?)
         alt Wszystkie 4 Guard Clauses spełnione
             L->>EBS: ec2:ModifyVolume(VolumeId, Throughput=125, Iops=3000)
-            L->>LOG: PutLogEvents (INFO): {"event": "ebs_modified", "direction": "scale_down"}
+            L->>LOG: PutLogEvents (INFO): event=ebs_modified, direction=scale_down
         else Którykolwiek Guard Clause odrzucił zejście
-            L->>LOG: PutLogEvents (INFO): {"event": "scale_down_skipped", "reason": "..."}
+            L->>LOG: PutLogEvents (INFO): event=scale_down_skipped, reason=...
         end
     end
 ```
